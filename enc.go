@@ -19,17 +19,6 @@ var (
 	salt       []byte
 )
 
-func init() {
-	if v := os.Getenv("FSENCRYPT_SECRET"); v != "" {
-		secretInit = v
-		salt = make([]byte, 32)
-		if _, err := rand.Read(salt); err != nil {
-			fmt.Printf("failed to generate salt: %v\n", err)
-			return
-		}
-	}
-}
-
 func SetSecret(secret string) {
 	secretInit = secret
 	salt = make([]byte, 32)
@@ -73,18 +62,31 @@ func DecryptDir(dir_name string) error {
 }
 
 func EncryptFile(inputfile string, outputfile string, pass ...string) error {
-	var key []byte
-	var err error
+	var password string
 	if len(pass) > 0 {
-		key, _, err = deriveKey([]byte(pass[0]), salt)
+		password = pass[0]
 	} else if secretInit != "" {
-		key, _, err = deriveKey([]byte(secretInit), salt)
+		password = secretInit
+	} else if v := os.Getenv("FSENCRYPT_SECRET"); v != "" {
+		secretInit = v
+		password = v
+		salt = make([]byte, 32)
+		if _, err := rand.Read(salt); err != nil {
+			fmt.Printf("failed to generate salt EncryptFile: %v\n", err)
+		}
+	} else {
+		return errors.New("secret is not set")
 	}
+
+	// Generate a new salt for each encryption
+	salt = make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		return fmt.Errorf("failed to generate salt: %v", err)
+	}
+
+	key, _, err := deriveKey([]byte(password), salt)
 	if err != nil {
 		return fmt.Errorf("error deriving key: %w", err)
-	}
-	if key == nil {
-		return errors.New("secret is not set")
 	}
 
 	b, err := os.ReadFile(inputfile)
@@ -105,17 +107,15 @@ func EncryptFile(inputfile string, outputfile string, pass ...string) error {
 }
 
 func DecryptFile(inputfile string, outputfile string, pass ...string) error {
-	var key []byte
-	var err error
+	var password string
 	if len(pass) > 0 {
-		key, _, err = deriveKey([]byte(pass[0]), salt)
+		password = pass[0]
 	} else if secretInit != "" {
-		key, _, err = deriveKey([]byte(secretInit), salt)
-	}
-	if err != nil {
-		return fmt.Errorf("error deriving key: %w", err)
-	}
-	if key == nil {
+		password = secretInit
+	} else if v := os.Getenv("FSENCRYPT_SECRET"); v != "" {
+		secretInit = v
+		password = v
+	} else {
 		return errors.New("secret is not set")
 	}
 
@@ -124,7 +124,18 @@ func DecryptFile(inputfile string, outputfile string, pass ...string) error {
 		return fmt.Errorf("unable to read encrypted file: %w", err)
 	}
 
-	result, err := decrypt(z)
+	// Extract salt from encrypted data
+	if len(z) < 32 {
+		return errors.New("encrypted file is too short")
+	}
+	salt = z[:32]
+
+	key, _, err := deriveKey([]byte(password), salt)
+	if err != nil {
+		return fmt.Errorf("error deriving key: %w", err)
+	}
+
+	result, err := decrypt(z, key)
 	if err != nil {
 		return fmt.Errorf("decryption failed: %w", err)
 	}
@@ -165,19 +176,13 @@ func encrypt(key []byte, plaintext []byte) []byte {
 	return result
 }
 
-func decrypt(data []byte) ([]byte, error) {
+func decrypt(data []byte, key []byte) ([]byte, error) {
 	if len(data) < len(salt) {
 		return nil, errors.New("data too short")
 	}
 
-	// Extract salt and use it to derive the key
-	dataSalt := data[:len(salt)]
+	// Get the ciphertext after the salt
 	ciphertext := data[len(salt):]
-
-	key, _, err := deriveKey([]byte(secretInit), dataSalt)
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive key: %w", err)
-	}
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -262,7 +267,7 @@ func DecryptData(inp []byte, pass ...string) ([]byte, error) {
 		return nil, errors.New("secret is not set")
 	}
 
-	result, err := decrypt(inp)
+	result, err := decrypt(inp, key)
 	if err != nil {
 		return nil, fmt.Errorf("decryption failed: %w", err)
 	}
