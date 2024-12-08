@@ -27,10 +27,22 @@ func SetSecret(secret string) {
 	}
 }
 
-func EncryptDir(dir_name string) error {
+func EncryptDir(dir_name string, pass ...string) error {
+	var password string
+	if len(pass) > 0 {
+		password = pass[0]
+	} else if secretInit != "" {
+		password = secretInit
+	} else if v := os.Getenv("FSENCRYPT_SECRET"); v != "" {
+		secretInit = v
+		password = v
+	} else {
+		return errors.New("secret is not set")
+	}
+
 	err := filepath.Walk(dir_name, func(path string, info fs.FileInfo, err error) error {
 		if !info.IsDir() {
-			err := EncryptFile(path, path+".encrypted")
+			err := EncryptFile(path, path+".encrypted", password)
 			if err != nil {
 				fmt.Println("error encrypting ", path, ":", err)
 				return err
@@ -44,10 +56,22 @@ func EncryptDir(dir_name string) error {
 	return nil
 }
 
-func DecryptDir(dir_name string) error {
+func DecryptDir(dir_name string, pass ...string) error {
+	var password string
+	if len(pass) > 0 {
+		password = pass[0]
+	} else if secretInit != "" {
+		password = secretInit
+	} else if v := os.Getenv("FSENCRYPT_SECRET"); v != "" {
+		secretInit = v
+		password = v
+	} else {
+		return errors.New("secret is not set")
+	}
+
 	err := filepath.Walk(dir_name, func(path string, info fs.FileInfo, err error) error {
 		if !info.IsDir() {
-			err := DecryptFile(path, path[:len(path)-10])
+			err := DecryptFile(path, path[:len(path)-10], password)
 			if err != nil {
 				fmt.Println("error decrypting ", path, ":", err)
 				return err
@@ -226,22 +250,31 @@ func deriveKey(password, salt []byte) ([]byte, []byte, error) {
 }
 
 func EncryptData(inp []byte, pass ...string) ([]byte, error) {
-	var key []byte
-	var err error
+	var password string
 	if len(pass) > 0 {
-		key, _, err = deriveKey([]byte(pass[0]), salt)
+		password = pass[0]
 	} else if secretInit != "" {
-		key, _, err = deriveKey([]byte(secretInit), salt)
-	} else {
-		if v := os.Getenv("FSENCRYPT_SECRET"); v != "" {
-			key, _, err = deriveKey([]byte(v), salt)
+		password = secretInit
+	} else if v := os.Getenv("FSENCRYPT_SECRET"); v != "" {
+		secretInit = v
+		password = v
+		salt = make([]byte, 32)
+		if _, err := rand.Read(salt); err != nil {
+			return nil, fmt.Errorf("failed to generate salt: %v", err)
 		}
+	} else {
+		return nil, errors.New("secret is not set")
 	}
+
+	// Generate a new salt for each encryption
+	salt = make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, fmt.Errorf("failed to generate salt: %v", err)
+	}
+
+	key, _, err := deriveKey([]byte(password), salt)
 	if err != nil {
 		return nil, fmt.Errorf("error deriving key: %w", err)
-	}
-	if key == nil {
-		return nil, errors.New("secret is not set")
 	}
 
 	ciphertext := encrypt(key, inp)
@@ -249,22 +282,26 @@ func EncryptData(inp []byte, pass ...string) ([]byte, error) {
 }
 
 func DecryptData(inp []byte, pass ...string) ([]byte, error) {
-	var key []byte
-	var err error
+	var password string
 	if len(pass) > 0 {
-		key, _, err = deriveKey([]byte(pass[0]), salt)
+		password = pass[0]
 	} else if secretInit != "" {
-		key, _, err = deriveKey([]byte(secretInit), salt)
+		password = secretInit
+	} else if v := os.Getenv("FSENCRYPT_SECRET"); v != "" {
+		secretInit = v
+		password = v
 	} else {
-		if v := os.Getenv("FSENCRYPT_SECRET"); v != "" {
-			key, _, err = deriveKey([]byte(v), salt)
-		}
+		return nil, errors.New("secret is not set")
 	}
+
+	if len(inp) < 32 {
+		return nil, errors.New("encrypted data is too short")
+	}
+	salt = inp[:32]
+
+	key, _, err := deriveKey([]byte(password), salt)
 	if err != nil {
 		return nil, fmt.Errorf("error deriving key: %w", err)
-	}
-	if key == nil {
-		return nil, errors.New("secret is not set")
 	}
 
 	result, err := decrypt(inp, key)
